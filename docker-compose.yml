@@ -1,0 +1,25 @@
+version: "3.8"
+services:
+  # notification-service:
+  #   build: .
+  #   container_name: used2book_notification_service
+  #   ports:
+  #     - "5001:5001"
+  #   depends_on:
+  #     - noti-mongodb
+  #   restart: unless-stopped
+
+  noti-mongodb:
+    image: mongo:latest
+    container_name: used2book_noti_mongodb
+    ports:
+      - "27018:27017"
+    volumes:
+      - noti_mongodb_data:/data/db
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: noti_user
+      MONGO_INITDB_ROOT_PASSWORD: noti_password
+    restart: unless-stopped
+
+volumes:
+  noti_mongodb_data:

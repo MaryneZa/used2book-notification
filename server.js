@@ -21,6 +21,12 @@ mongoose.connect(mongoURI)
 // Notification Schema
 const notificationSchema = new mongoose.Schema({
     user_id: Number,
+
+    //  payment
+    buyer_id: data.buyer_id,
+    listing_id: data.listing_id,
+    seller_id: data.seller_id,
+
     type: String,
     message: String,
     related_id: String,
@@ -107,6 +113,66 @@ amqp.connect("amqp://guest:guest@localhost:5672").then(function (conn) {
                 }
             });
         });
+
+        // notification-service.js
+        ch.assertQueue("payment_queue").then(function () {
+            ch.consume("payment_queue", async function (msg) {
+                if (msg !== null) {
+                    const data = JSON.parse(msg.content.toString());
+                    console.log("Consumed from payment_queue:", data);
+                    const noti_seller = new Notification({
+                        user_id: data.seller_id,
+                        buyer_id: data.buyer_id,
+                        listing_id: data.listing_id,
+                        seller_id: data.seller_id,
+                        type: data.type,
+                        message: data.message,
+                        related_id: data.related_id,
+                        read: false,
+                        created_at: data.created_at,
+                    });
+                    await noti_seller.save();
+
+                    const noti_buyer = new Notification({
+                        user_id: data.buyer_id,
+                        buyer_id: data.buyer_id,
+                        listing_id: data.listing_id,
+                        seller_id: data.seller_id,
+                        type: data.type,
+                        message: data.message,
+                        related_id: data.related_id,
+                        read: false,
+                        created_at: data.created_at,
+                    });
+                    await noti_buyer.save();
+
+                    // Emit to seller
+                    io.to(`user_${data.seller_id}`).emit("payment_success", {
+                        id: noti_seller._id.toString(),
+                        message: data.message,
+                        related_id: data.related_id,
+                    });
+
+                    // Emit to buyer
+                    io.to(`user_${data.buyer_id}`).emit("payment_success", {
+                        id: noti_buyer._id.toString(),
+                        message: data.message,
+                        related_id: data.related_id,
+                    });
+
+                    // Update unread payment count
+                    const paymentCountSeller = await Notification.countDocuments({ user_id: data.seller_id, type: "payment_success", read: false });
+                    io.to(`user_${data.seller_id}`).emit("unread_payment_count", { payments: paymentCountSeller });
+
+                    const paymentCountBuyer = await Notification.countDocuments({ user_id: data.buyer_id, type: "payment_success", read: false });
+                    io.to(`user_${data.buyer_id}`).emit("unread_payment_count", { payments: paymentCountBuyer });
+
+
+                    ch.ack(msg);
+                }
+            });
+        });
+
     });
 }).catch(err => console.error("RabbitMQ connection error:", err));
 
@@ -209,6 +275,20 @@ server.on("request", async (req, res) => {
             res.end(JSON.stringify({ error: "Internal server error" }));
         }
     }
+
+    if (url.pathname === "/notifications/unread-payments" && req.method === "GET") {
+        try {
+            const userId = url.searchParams.get("user_id");
+            const paymentCount = await Notification.countDocuments({ user_id: userId, type: "payment_success", read: false });
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify({ payments: paymentCount }));
+        } catch (err) {
+            res.statusCode = 500;
+            res.end(JSON.stringify({ error: "Internal server error" }));
+        }
+    }
 });
 
 server.listen(5001, () => console.log("Notification Service running on port 5001"));
+
+

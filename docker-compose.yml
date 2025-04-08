@@ -1,13 +1,5 @@
 version: "3.8"
 services:
-  # notification-service:
-  #   build: .
-  #   container_name: used2book_notification_service
-  #   ports:
-  #     - "5001:5001"
-  #   depends_on:
-  #     - noti-mongodb
-  #   restart: unless-stopped
 
   noti-mongodb:
     image: mongo:latest
@@ -21,5 +13,21 @@ services:
       MONGO_INITDB_ROOT_PASSWORD: noti_password
     restart: unless-stopped
 
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: used2book_rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    restart: unless-stopped
+
 volumes:
   noti_mongodb_data:
+  # notification-service:
+  #   build: .
+  #   container_name: used2book_notification_service
+  #   ports:
+  #     - "5001:5001"
+  #   depends_on:
+  #     - noti-mongodb
+  #   restart: unless-stopped

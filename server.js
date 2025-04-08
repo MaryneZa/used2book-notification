@@ -167,6 +167,20 @@ amqp.connect("amqp://guest:guest@localhost:5672").then(function (conn) {
                     const paymentCountBuyer = await Notification.countDocuments({ user_id: data.buyer_id, type: "payment_success", read: false });
                     io.to(`user_${data.buyer_id}`).emit("unread_payment_count", { payments: paymentCountBuyer });
 
+                    const notiListSeller = await Notification.find({
+                        user_id: data.seller_id,
+                        type: "payment_success"
+                    }).sort({ created_at: -1 }).lean();
+                    
+                    const notiListBuyer = await Notification.find({
+                        user_id: data.buyer_id,
+                        type: "payment_success"
+                    }).sort({ created_at: -1 }).lean();
+                    
+                    io.to(`user_${data.seller_id}`).emit("payment_list", notiListSeller);
+
+                    io.to(`user_${data.buyer_id}`).emit("payment_list", notiListBuyer);
+
 
                     ch.ack(msg);
                 }

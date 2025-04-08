@@ -23,9 +23,9 @@ const notificationSchema = new mongoose.Schema({
     user_id: Number,
 
     //  payment
-    buyer_id: data.buyer_id,
-    listing_id: data.listing_id,
-    seller_id: data.seller_id,
+    buyer_id: Number,
+    listing_id: Number,
+    seller_id: Number,
 
     type: String,
     message: String,
@@ -177,9 +177,9 @@ amqp.connect("amqp://guest:guest@localhost:5672").then(function (conn) {
                         type: "payment_success"
                     }).sort({ created_at: -1 }).lean();
                     
-                    io.to(`user_${data.seller_id}`).emit("payment_list", notiListSeller);
+                    io.to(`user_${data.seller_id}`).emit("payment_list", {lists: notiListSeller});
 
-                    io.to(`user_${data.buyer_id}`).emit("payment_list", notiListBuyer);
+                    io.to(`user_${data.buyer_id}`).emit("payment_list", {lists: notiListBuyer});
 
 
                     ch.ack(msg);
@@ -296,6 +296,23 @@ server.on("request", async (req, res) => {
             const paymentCount = await Notification.countDocuments({ user_id: userId, type: "payment_success", read: false });
             res.setHeader("Content-Type", "application/json");
             res.end(JSON.stringify({ payments: paymentCount }));
+        } catch (err) {
+            res.statusCode = 500;
+            res.end(JSON.stringify({ error: "Internal server error" }));
+        }
+    }
+
+    if (url.pathname === "/notifications/all-payments" && req.method === "GET") {
+        try {
+            const userId = url.searchParams.get("user_id");
+            
+            const notiList = await Notification.find({
+                user_id: userId,
+                type: "payment_success"
+            }).sort({ created_at: -1 }).lean();
+
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify({ lists: notiList }));
         } catch (err) {
             res.statusCode = 500;
             res.end(JSON.stringify({ error: "Internal server error" }));

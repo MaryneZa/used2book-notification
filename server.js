@@ -48,10 +48,27 @@ async function getUnreadChatCount(userId) {
     return unreadChats.length > 0 ? unreadChats[0].uniqueChats : 0;
 }
 
+async function getUnreadOfferCount(userId) {
+    const unreadChats = await Notification.aggregate([
+        { $match: { user_id: Number(userId), type: "chat", read: false } },
+        { $group: { _id: "$chatId" } },
+        { $count: "uniqueChats" }
+    ]);
+    console.log("unreadChats:", unreadChats);
+    console.log("unreadChats.length:", unreadChats.length);
+    return unreadChats.length > 0 ? unreadChats[0].uniqueChats : 0;
+}
+
 // Socket.IO Connection
 io.on("connection", (socket) => {
     const userId = socket.handshake.query.user_id;
+    const isAdmin = socket.handshake.query.isAdmin; // New: Check if user is admin
     socket.join(`user_${userId}`);
+    if (isAdmin) {
+        socket.join("admin_room"); // New: Admins join admin_room
+        console.log(`Admin ${userId} joined admin_room`);
+    }
+
     console.log(`User ${userId} connected`);
 
     socket.on("get_unread_counts", async () => {
@@ -171,16 +188,71 @@ amqp.connect("amqp://guest:guest@localhost:5672").then(function (conn) {
                         user_id: data.seller_id,
                         type: "payment_success"
                     }).sort({ created_at: -1 }).lean();
-                    
+
                     const notiListBuyer = await Notification.find({
                         user_id: data.buyer_id,
                         type: "payment_success"
                     }).sort({ created_at: -1 }).lean();
-                    
-                    io.to(`user_${data.seller_id}`).emit("payment_list", {lists: notiListSeller});
 
-                    io.to(`user_${data.buyer_id}`).emit("payment_list", {lists: notiListBuyer});
+                    io.to(`user_${data.seller_id}`).emit("payment_list", { lists: notiListSeller });
 
+                    io.to(`user_${data.buyer_id}`).emit("payment_list", { lists: notiListBuyer });
+
+
+                    ch.ack(msg);
+                }
+            });
+        });
+
+        ch.assertQueue("offer_queue").then(function () {
+            ch.consume("offer_queue", async function (msg) {
+                if (msg !== null) {
+                    const data = JSON.parse(msg.content.toString());
+                    console.log("Consumed from offer_queue:", data);
+
+                    // type: "offer"
+                    const noti = new Notification({
+                        user_id: data.user_id,
+                        type: data.type,
+                        read: false,
+                        created_at: data.created_at,
+                    });
+                    await noti.save();
+
+
+                    // Update unread payment count
+                    const offerCount = await Notification.countDocuments({ user_id: data.user_id, type: "offer", read: false });
+                    io.to(`user_${data.user_id}`).emit("unread_offer_count", { offers: offerCount });
+
+                    ch.ack(msg);
+                }
+            });
+        });
+
+        ch.assertQueue("admin_queue").then(function () {
+            ch.consume("admin_queue", async function (msg) {
+                if (msg !== null) {
+                    const data = JSON.parse(msg.content.toString());
+                    console.log("Consumed from admin_queue:", data);
+
+                    // type: "request, response"
+                    const noti = new Notification({
+                        user_id: data.user_id,
+                        type: data.type,
+                        read: false,
+                        created_at: data.created_at,
+                    });
+                    await noti.save();
+
+
+                    // Update unread payment count
+                    const adminCount = await Notification.countDocuments({ type: "admin_request", read: false });
+                    io.to("admin_room").emit("unread_request_count", { admins: adminCount });
+
+                    const req = await Notification.find({
+                        type: "admin_request"
+                    }).sort({ created_at: -1 }).lean();
+                    io.to("admin_room").emit("admin_request_list", { lists: req });
 
                     ch.ack(msg);
                 }
@@ -303,13 +375,16 @@ server.on("request", async (req, res) => {
     }
 
     if (url.pathname === "/notifications/all-payments" && req.method === "GET") {
+        console.log("get all payment")
         try {
             const userId = url.searchParams.get("user_id");
-            
+
             const notiList = await Notification.find({
                 user_id: userId,
                 type: "payment_success"
             }).sort({ created_at: -1 }).lean();
+
+            console.log(notiList)
 
             res.setHeader("Content-Type", "application/json");
             res.end(JSON.stringify({ lists: notiList }));
@@ -318,6 +393,141 @@ server.on("request", async (req, res) => {
             res.end(JSON.stringify({ error: "Internal server error" }));
         }
     }
+
+
+    if (url.pathname === "/notifications/mark-payment-read" && req.method === "POST") {
+        let body = "";
+        req.setTimeout(5000, () => {
+            res.statusCode = 408;
+            res.end(JSON.stringify({ error: "Request timed out" }));
+        });
+        req.on("data", chunk => body += chunk);
+        req.on("end", async () => {
+            console.log("Received mark-payment-read request:", body);
+            try {
+                const { user_id } = JSON.parse(body);
+                console.log(`Updating notifications for user_id: ${user_id}`);
+                const result = await Notification.updateMany(
+                    { user_id: Number(user_id), read: false, type: "payment_success" },
+                    { $set: { read: true } }
+                );
+                console.log("Update result:", result);
+
+                const paymentCount = await Notification.countDocuments({ user_id: Number(user_id), type: "payment_success", read: false });
+                io.to(`user_${user_id}`).emit("unread_payment_count", { payments: paymentCount });
+
+                console.log(`Emitting unread_payment_counts to user_${user_id}: payments=${paymentCount}`);
+                res.setHeader("Content-Type", "application/json");
+                res.end(JSON.stringify({ success: true, modifiedCount: result.modifiedCount }));
+            } catch (err) {
+                console.error("Error in mark-payment-read:", err);
+                res.statusCode = 500;
+                res.end(JSON.stringify({ error: "Internal server error" }));
+            }
+        });
+    }
+
+    if (url.pathname === "/notifications/unread-offers" && req.method === "GET") {
+        try {
+            const userId = url.searchParams.get("user_id");
+            const offerCount = await Notification.countDocuments({ user_id: userId, type: "offer", read: false });
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify({ offers: offerCount }));
+        } catch (err) {
+            res.statusCode = 500;
+            res.end(JSON.stringify({ error: "Internal server error" }));
+        }
+    }
+
+    if (url.pathname === "/notifications/mark-offer-read" && req.method === "POST") {
+        let body = "";
+        req.setTimeout(5000, () => {
+            res.statusCode = 408;
+            res.end(JSON.stringify({ error: "Request timed out" }));
+        });
+        req.on("data", chunk => body += chunk);
+        req.on("end", async () => {
+            console.log("Received mark-offer-read request:", body);
+            try {
+                const { user_id } = JSON.parse(body);
+                console.log(`Updating notifications for user_id: ${user_id}`);
+                const result = await Notification.updateMany(
+                    { user_id: Number(user_id), read: false, type: "offer" },
+                    { $set: { read: true } }
+                );
+                console.log("Update result:", result);
+
+                const offerCount = await Notification.countDocuments({ user_id: data.user_id, type: "offer", read: false });
+                io.to(`user_${data.user_id}`).emit("unread_offer_count", { offers: offerCount });
+
+                console.log(`Emitting unread_offer_counts to user_${user_id}: offers=${offerCount}`);
+                res.setHeader("Content-Type", "application/json");
+                res.end(JSON.stringify({ success: true, modifiedCount: result.modifiedCount }));
+            } catch (err) {
+                console.error("Error in mark-offer-read:", err);
+                res.statusCode = 500;
+                res.end(JSON.stringify({ error: "Internal server error" }));
+            }
+        });
+    }
+
+    if (url.pathname === "/notifications/unread-admin-requests" && req.method === "GET") {
+        try {
+            const reqCount = await Notification.countDocuments({ type: "admin_request", read: false });
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify({ counts: reqCount }));
+        } catch (err) {
+            res.statusCode = 500;
+            res.end(JSON.stringify({ error: "Internal server error" }));
+        }
+    }
+
+    if (url.pathname === "/notifications/mark-admin-request-read" && req.method === "POST") {
+        let body = "";
+        req.setTimeout(5000, () => {
+            res.statusCode = 408;
+            res.end(JSON.stringify({ error: "Request timed out" }));
+        });
+        req.on("data", chunk => body += chunk);
+        req.on("end", async () => {
+            console.log("Received mark-admin-req-read request:", body);
+            try {
+                const result = await Notification.updateMany(
+                    { read: false, type: "admin_request" },
+                    { $set: { read: true } }
+                );
+                console.log("Update result:", result);
+
+                const adminCount = await Notification.countDocuments({ type: "admin_request", read: false });
+                io.to("admin_room").emit("unread_request_count", { admins: adminCount });
+
+                console.log(`Emitting unread_admin_req_counts to admin room: reqs=${adminCount}`);
+                res.setHeader("Content-Type", "application/json");
+                res.end(JSON.stringify({ success: true, modifiedCount: result.modifiedCount }));
+            } catch (err) {
+                console.error("Error in mark-admin-read:", err);
+                res.statusCode = 500;
+                res.end(JSON.stringify({ error: "Internal server error" }));
+            }
+        });
+    }
+    if (url.pathname === "/notifications/all-admin-requests" && req.method === "GET") {
+        try {
+
+            const req = await Notification.find({
+                type: "admin_request"
+            }).sort({ created_at: -1 }).lean();
+
+
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify({ lists: req }));
+        } catch (err) {
+            res.statusCode = 500;
+            res.end(JSON.stringify({ error: "Internal server error" }));
+        }
+    }
+
+
 });
 
 server.listen(5001, () => console.log("Notification Service running on port 5001"));
